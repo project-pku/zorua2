@@ -15,7 +15,7 @@ pub fn read_u64(src: &[u8], bit_offset: usize, bit_count: usize) -> u64 {
     }
     let start_byte = bit_offset / 8;
     let shift = bit_offset % 8;
-    let bytes_needed = (shift + bit_count + 7) / 8;
+    let bytes_needed = (shift + bit_count).div_ceil(8);
     let mut buf = 0u64;
     let count = bytes_needed.min(8);
     let mut i = 0;
@@ -47,7 +47,7 @@ pub fn write_u64(dst: &mut [u8], bit_offset: usize, bit_count: usize, val: u64) 
     }
     let start_byte = bit_offset / 8;
     let shift = bit_offset % 8;
-    let bytes_needed = (shift + bit_count + 7) / 8;
+    let bytes_needed = (shift + bit_count).div_ceil(8);
     let mask = if bit_count >= 64 {
         !0u64
     } else {
@@ -64,7 +64,7 @@ pub fn write_u64(dst: &mut [u8], bit_offset: usize, bit_count: usize, val: u64) 
             i += 1;
         }
         let shifted_mask = if shift + bit_count >= 64 {
-            !0u64 & !((1u64 << shift) - 1)
+            !((1u64 << shift) - 1)
         } else {
             mask << shift
         };
@@ -83,7 +83,7 @@ pub fn write_u64(dst: &mut [u8], bit_offset: usize, bit_count: usize, val: u64) 
             i += 1;
         }
         // Clear bits [shift..64) in buf and set them from val
-        let low_mask = !0u64 & !((1u64 << shift) - 1);
+        let low_mask = !((1u64 << shift) - 1);
         buf = (buf & !low_mask) | (val << shift);
         i = 0;
         while i < 8 {
@@ -113,6 +113,20 @@ pub fn are_zero(src: &[u8], bit_offset: usize, bit_count: usize) -> bool {
         remaining -= 64;
     }
     read_u64(src, offset, remaining) == 0
+}
+
+/// Zero `bit_count` bits in `dst` starting at `bit_offset`.
+pub fn zero(dst: &mut [u8], bit_offset: usize, bit_count: usize) {
+    let mut offset = bit_offset;
+    let mut remaining = bit_count;
+    while remaining > 64 {
+        write_u64(dst, offset, 64, 0);
+        offset += 64;
+        remaining -= 64;
+    }
+    if remaining > 0 {
+        write_u64(dst, offset, remaining, 0);
+    }
 }
 
 /// Copy `bit_count` bits from `src` at `src_bit` to `dst` at `dst_bit`.
@@ -227,6 +241,25 @@ mod tests {
         let mut result = [0u8; 10];
         copy(&container, 19, &mut result, 0, 80);
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_zero() {
+        let mut buf = [0xFFu8; 8];
+        zero(&mut buf, 4, 16);
+        assert_eq!(read_u64(&buf, 4, 16), 0);
+        // Surrounding bits preserved
+        assert_eq!(read_u64(&buf, 0, 4), 0xF);
+        assert_eq!(read_u64(&buf, 20, 4), 0xF);
+    }
+
+    #[test]
+    fn test_zero_wide() {
+        let mut buf = [0xFFu8; 20];
+        zero(&mut buf, 8, 128);
+        assert!(are_zero(&buf, 8, 128));
+        assert_eq!(buf[0], 0xFF); // preserved
+        assert_eq!(buf[17], 0xFF); // preserved
     }
 
     #[test]

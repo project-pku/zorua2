@@ -133,8 +133,8 @@ pub trait Zorua<S>: Sized + Clone {
     /// Read from bit-packed bytes at an arbitrary bit offset.
     fn read_bits(src: &[u8], bit_offset: usize) -> Self;
 
-    /// Try to read from bit-packed bytes. Returns Err(()) on invalid data.
-    fn try_read_bits(src: &[u8], bit_offset: usize) -> Result<Self, ()> {
+    /// Try to read from bit-packed bytes. Returns Err(raw_value) on invalid data.
+    fn try_read_bits(src: &[u8], bit_offset: usize) -> Result<Self, S> {
         Ok(Self::read_bits(src, bit_offset))
     }
 
@@ -215,7 +215,9 @@ macro_rules! impl_zorua_identity_for_ux2 {
 }
 
 impl_zorua_identity_for_ux2!(u1, u2, u3, u4, u5, u6, u7, u9, u10, u11, u12, u13, u14, u15);
-impl_zorua_identity_for_ux2!(u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28, u29, u30, u31);
+impl_zorua_identity_for_ux2!(
+    u17, u18, u19, u20, u21, u22, u23, u24, u25, u26, u27, u28, u29, u30, u31
+);
 
 // =====================================================================
 // Zorua identity impls for endian types (u16_le, u32_le, etc.)
@@ -295,5 +297,70 @@ impl<T: Zorua<T>, const N: usize> Zorua<[T; N]> for [T; N] {
         for (i, elem) in self.iter().enumerate() {
             elem.write_bits(dst, bit_offset + i * stride);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::prelude::*;
+
+    bitfields! {
+        #[repr(C)]
+        #[derive(ZoruaStruct, Clone, Debug, PartialEq, Eq)]
+        struct Slot {
+            data: u32_le {
+                pub id: u9@0,
+                pub level: u7@9,
+            },
+        }
+    }
+
+    impl Zorua<Slot> for Slot {
+        const BITS: usize = 16;
+        const IS_FALLIBLE: bool = false;
+        fn read_bits(src: &[u8], bit_offset: usize) -> Self {
+            Self {
+                data: u32_le::new(bits::read_u64(src, bit_offset, 16) as u32),
+            }
+        }
+        fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
+            bits::write_u64(dst, bit_offset, 16, self.data.value() as u64);
+        }
+    }
+
+    bitfields! {
+        #[repr(C)]
+        #[derive(ZoruaStruct, Clone, Debug, PartialEq, Eq)]
+        struct Container {
+            data: [u8; 16] {
+                #[zeroedoption]
+                pub slots: [Slot; 4]@8,
+            },
+        }
+    }
+
+    #[test]
+    fn test_zeroedoption_array_subfield() {
+        let mut c = Container { data: [0u8; 16] };
+
+        // All slots start as None
+        assert!(c.slots(0).is_none());
+        assert!(c.slots(1).is_none());
+
+        // Write a slot
+        let mut slot = Slot {
+            data: u32_le::new(0),
+        };
+        slot.set_id(u9::new(42));
+        slot.set_level(u7::new(5));
+        c.set_slots(0, Some(slot.clone()));
+
+        assert_eq!(c.slots(0).unwrap().id(), u9::new(42));
+        assert_eq!(c.slots(0).unwrap().level(), u7::new(5));
+        assert!(c.slots(1).is_none());
+
+        // Clear a slot
+        c.set_slots(0, None);
+        assert!(c.slots(0).is_none());
     }
 }
