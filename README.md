@@ -53,12 +53,33 @@ bitstruct! {
     #[repr(C)]
     #[endian(little)]
     #[derive(Clone, Debug, PartialEq, Eq)]
+    #[size(bytes = 4)]
+    #[offset(id = 0, flags = 2)]
     pub struct Header {
         pub id: u16,
-        flags: u16 {
-            pub kind: u4@0,
-            pub active: bool@4,
+        bits flags: u16 {
+            pub kind: u4,
+            pub active: bool,
+            pad 11,
         },
+    }
+}
+```
+
+Layout assertions are optional compile-time sanity checks. `#[size(...)]`
+asserts the generated Rust struct size, and `#[offset(...)]` asserts byte
+offsets for named fields:
+
+```rust
+# use zorua::prelude::*;
+bitstruct! {
+    #[repr(C)]
+    #[endian(big)]
+    #[size(bytes = 6, bits = 48)]
+    #[offset(id = 0, count = 2)]
+    pub struct BigEndianHeader {
+        pub id: u16,
+        pub count: u32,
     }
 }
 ```
