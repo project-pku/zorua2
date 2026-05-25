@@ -1104,35 +1104,43 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
         })
         .collect();
 
-    // Generate bitfield subfield accessors with sequential offset resolution.
-    let bitfield_assertions: Vec<_> = fields
-        .iter()
-        .filter_map(|f| {
-            f.bitfield_subfields.as_ref().map(|subfields| {
-                let container_type = &f.storage_type;
-                let mut current_offset: proc_macro2::TokenStream = quote! { 0usize };
+    // For concrete structs, emit eager top-level bit coverage assertions so
+    // incomplete bitfields fail even when no accessor is referenced. Generic
+    // bitfield coverage is still checked in generated accessors; stable Rust
+    // cannot express the same eager assertion for arbitrary generic consts.
+    let bitfield_assertions: Vec<_> = if generics.params.is_empty() {
+        fields
+            .iter()
+            .filter_map(|f| {
+                f.bitfield_subfields.as_ref().map(|subfields| {
+                    let container_type = &f.storage_type;
+                    let mut current_offset: proc_macro2::TokenStream = quote! { 0usize };
 
-                for sf in subfields {
-                    if let Some(ref explicit) = sf.bit_offset {
-                        current_offset = quote! { #explicit };
+                    for sf in subfields {
+                        if let Some(ref explicit) = sf.bit_offset {
+                            current_offset = quote! { #explicit };
+                        }
+                        let bits_expr = field_bits_expr(sf);
+                        let prev = current_offset.clone();
+                        current_offset = quote! { #prev + #bits_expr };
                     }
-                    let bits_expr = field_bits_expr(sf);
-                    let prev = current_offset.clone();
-                    current_offset = quote! { #prev + #bits_expr };
-                }
 
-                quote! {
-                    const _: () = {
-                        assert!(
-                            #current_offset == <#container_type as BitCodec<#container_type>>::BITS,
-                            "bitfield does not account for every bit in its storage"
-                        );
-                    };
-                }
+                    quote! {
+                        const _: () = {
+                            assert!(
+                                #current_offset == <#container_type as BitCodec<#container_type>>::BITS,
+                                "bitfield does not account for every bit in its storage"
+                            );
+                        };
+                    }
+                })
             })
-        })
-        .collect();
+            .collect()
+    } else {
+        Vec::new()
+    };
 
+    // Generate bitfield subfield accessors with sequential offset resolution.
     let bitfield_accessors: Vec<_> = fields
         .iter()
         .filter_map(|f| {
