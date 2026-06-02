@@ -1,0 +1,5 @@
+error: `as` storage syntax has been replaced by #[storage(...)]
+ --> tests/ui/native_storage_explicit.rs:7:9
+  |
+7 |         value: u16 as u16,
+  |         ^^^^^

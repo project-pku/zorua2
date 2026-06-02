@@ -1,0 +1,5 @@
+error: native multi-byte storage needs #[endian(little)] or #[endian(big)]
+ --> tests/ui/native_storage_no_default.rs:7:9
+  |
+7 |         value: u16,
+  |         ^^^^^
