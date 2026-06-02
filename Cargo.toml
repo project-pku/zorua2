@@ -3,7 +3,7 @@ members = ["zorua_macro"]
 
 [package]
 name = "zorua"
-version = "0.12.0"
+version = "0.12.1"
 edition = "2024"
 
 [features]
