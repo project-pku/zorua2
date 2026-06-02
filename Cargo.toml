@@ -14,4 +14,7 @@ std = []
 paste = "^1.0.14"
 ux2 = { version = "^0.8.5", features = ["32"] }
 zorua_macro = { path = "zorua_macro" }
-num-traits = { version = "^0.2", default-features = false, optional = true }
+zerocopy = { version = "0.8.48", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+trybuild = "1"
