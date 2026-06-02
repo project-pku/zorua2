@@ -111,11 +111,11 @@ impl<'a, T, S> BitArrayView<'a, T, S> {
     }
 
     #[inline]
-    pub fn get(&self, index: usize) -> Option<T>
+    pub fn get(&self, index: usize) -> Option<<T as BitCodec<S>>::Read>
     where
         T: BitCodec<S>,
     {
-        (index < self.len).then(|| T::read_bits(self.bytes, self.bit_offset + index * self.stride))
+        (index < self.len).then(|| T::read(self.bytes, self.bit_offset + index * self.stride))
     }
 
     #[inline]
@@ -128,11 +128,11 @@ impl<'a, T, S> BitArrayView<'a, T, S> {
     }
 
     #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = T> + '_
+    pub fn iter(&self) -> impl Iterator<Item = <T as BitCodec<S>>::Read> + '_
     where
         T: BitCodec<S>,
     {
-        (0..self.len).map(|index| T::read_bits(self.bytes, self.bit_offset + index * self.stride))
+        (0..self.len).map(|index| T::read(self.bytes, self.bit_offset + index * self.stride))
     }
 }
 
@@ -167,11 +167,11 @@ impl<'a, T, S> BitArrayViewMut<'a, T, S> {
     }
 
     #[inline]
-    pub fn get(&self, index: usize) -> Option<T>
+    pub fn get(&self, index: usize) -> Option<<T as BitCodec<S>>::Read>
     where
         T: BitCodec<S>,
     {
-        (index < self.len).then(|| T::read_bits(self.bytes, self.bit_offset + index * self.stride))
+        (index < self.len).then(|| T::read(self.bytes, self.bit_offset + index * self.stride))
     }
 
     #[inline]
@@ -343,6 +343,9 @@ pub trait BitCodec<S>: Sized {
     /// Whether reading can fail because not every storage value is valid.
     const IS_FALLIBLE: bool;
 
+    /// Public read result for this storage representation.
+    type Read;
+
     /// Read from bit-packed bytes at an arbitrary bit offset.
     fn read_bits(src: &[u8], bit_offset: usize) -> Self;
 
@@ -352,6 +355,10 @@ pub trait BitCodec<S>: Sized {
         Ok(Self::read_bits(src, bit_offset))
     }
 
+    /// Read using the public API shape for this codec. Infallible codecs return
+    /// `Self`; fallible codecs return `Result<Self, S>`.
+    fn read(src: &[u8], bit_offset: usize) -> Self::Read;
+
     /// Write to bit-packed bytes at an arbitrary bit offset.
     fn write_bits(&self, dst: &mut [u8], bit_offset: usize);
 }
@@ -359,6 +366,7 @@ pub trait BitCodec<S>: Sized {
 impl BitCodec<bool> for bool {
     const BITS: usize = 1;
     const IS_FALLIBLE: bool = false;
+    type Read = Self;
 
     #[inline]
     fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -369,6 +377,11 @@ impl BitCodec<bool> for bool {
     fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
         bits::write_u64(dst, bit_offset, 1, *self as u64);
     }
+
+    #[inline]
+    fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+        Self::read_bits(src, bit_offset)
+    }
 }
 
 macro_rules! impl_bitcodec_identity_for_primitives {
@@ -377,6 +390,7 @@ macro_rules! impl_bitcodec_identity_for_primitives {
             impl BitCodec<$ty> for $ty {
                 const BITS: usize = <$ty>::BITS as usize;
                 const IS_FALLIBLE: bool = false;
+                type Read = Self;
 
                 #[inline]
                 fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -386,6 +400,11 @@ macro_rules! impl_bitcodec_identity_for_primitives {
                 #[inline]
                 fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
                     bits::write_u64(dst, bit_offset, <$ty>::BITS as usize, *self as u64);
+                }
+
+                #[inline]
+                fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                    <$ty as BitCodec<$ty>>::read_bits(src, bit_offset)
                 }
             }
         )*
@@ -400,6 +419,7 @@ macro_rules! impl_bitcodec_identity_for_ux2 {
             impl BitCodec<$ty> for $ty {
                 const BITS: usize = <$ty>::BITS as usize;
                 const IS_FALLIBLE: bool = false;
+                type Read = Self;
 
                 #[inline]
                 fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -410,6 +430,11 @@ macro_rules! impl_bitcodec_identity_for_ux2 {
                 fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
                     let val: u64 = (*self).into();
                     bits::write_u64(dst, bit_offset, <$ty>::BITS as usize, val);
+                }
+
+                #[inline]
+                fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                    <$ty as BitCodec<$ty>>::read_bits(src, bit_offset)
                 }
             }
         )*
@@ -426,6 +451,7 @@ macro_rules! impl_unsigned_endian_bitcodec {
         impl<O: ByteOrder> BitCodec<$wrapper<O>> for $wrapper<O> {
             const BITS: usize = $bits;
             const IS_FALLIBLE: bool = false;
+            type Read = Self;
 
             #[inline]
             fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -438,11 +464,17 @@ macro_rules! impl_unsigned_endian_bitcodec {
             fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
                 bits::copy(self.as_bytes(), 0, dst, bit_offset, $bits);
             }
+
+            #[inline]
+            fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                <$wrapper<O> as BitCodec<$wrapper<O>>>::read_bits(src, bit_offset)
+            }
         }
 
         impl<O: ByteOrder> BitCodec<$wrapper<O>> for $native {
             const BITS: usize = $bits;
             const IS_FALLIBLE: bool = false;
+            type Read = Self;
 
             #[inline]
             fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -452,6 +484,11 @@ macro_rules! impl_unsigned_endian_bitcodec {
             #[inline]
             fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
                 $wrapper::<O>::new(*self).write_bits(dst, bit_offset);
+            }
+
+            #[inline]
+            fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                <$native as BitCodec<$wrapper<O>>>::read_bits(src, bit_offset)
             }
         }
     };
@@ -462,6 +499,7 @@ macro_rules! impl_signed_endian_bitcodec {
         impl<O: ByteOrder> BitCodec<$wrapper<O>> for $wrapper<O> {
             const BITS: usize = $bits;
             const IS_FALLIBLE: bool = false;
+            type Read = Self;
 
             #[inline]
             fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -474,11 +512,17 @@ macro_rules! impl_signed_endian_bitcodec {
             fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
                 bits::copy(self.as_bytes(), 0, dst, bit_offset, $bits);
             }
+
+            #[inline]
+            fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                <$wrapper<O> as BitCodec<$wrapper<O>>>::read_bits(src, bit_offset)
+            }
         }
 
         impl<O: ByteOrder> BitCodec<$wrapper<O>> for $native {
             const BITS: usize = $bits;
             const IS_FALLIBLE: bool = false;
+            type Read = Self;
 
             #[inline]
             fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -488,6 +532,11 @@ macro_rules! impl_signed_endian_bitcodec {
             #[inline]
             fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
                 $wrapper::<O>::new(*self).write_bits(dst, bit_offset);
+            }
+
+            #[inline]
+            fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                <$native as BitCodec<$wrapper<O>>>::read_bits(src, bit_offset)
             }
         }
     };
@@ -503,6 +552,7 @@ impl_signed_endian_bitcodec!(I64, i64, 64, 8);
 impl<T: BitCodec<T>, const N: usize> BitCodec<[T; N]> for [T; N] {
     const BITS: usize = <T as BitCodec<T>>::BITS * N;
     const IS_FALLIBLE: bool = <T as BitCodec<T>>::IS_FALLIBLE;
+    type Read = Self;
 
     #[inline]
     fn read_bits(src: &[u8], bit_offset: usize) -> Self {
@@ -517,6 +567,11 @@ impl<T: BitCodec<T>, const N: usize> BitCodec<[T; N]> for [T; N] {
             elem.write_bits(dst, bit_offset + i * stride);
         }
     }
+
+    #[inline]
+    fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+        <Self as BitCodec<[T; N]>>::read_bits(src, bit_offset)
+    }
 }
 
 #[cfg(test)]
@@ -525,11 +580,12 @@ mod tests {
 
     bitstruct! {
         #[repr(C)]
+        #[endian(little)]
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         struct Slot {
-            data: u32_le {
-                pub id: u9@0,
-                pub level: u7@9,
+            bits data: u16 {
+                pub id: u9,
+                pub level: u7,
             },
         }
     }
@@ -537,6 +593,7 @@ mod tests {
     impl BitCodec<Slot> for Slot {
         const BITS: usize = 16;
         const IS_FALLIBLE: bool = false;
+        type Read = Self;
 
         fn read_bits(src: &[u8], bit_offset: usize) -> Self {
             let mut slot = Slot::new_zeroed();
@@ -547,15 +604,21 @@ mod tests {
         fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
             bits::copy(self.as_bytes(), 0, dst, bit_offset, Self::BITS);
         }
+
+        fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+            Self::read_bits(src, bit_offset)
+        }
     }
 
     bitstruct! {
         #[repr(C)]
         #[derive(Clone, Debug, PartialEq, Eq)]
         struct Container {
-            data: [u8; 16] {
+            bits data: [u8; 16] {
+                pad 8,
                 #[zeroedoption]
                 pub slots: [Slot; 4]@8,
+                pad 56,
             },
         }
     }
