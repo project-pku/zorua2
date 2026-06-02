@@ -657,6 +657,8 @@ mod tests {
     bitstruct! {
         #[repr(C)]
         #[endian(big)]
+        #[size(bytes = 6, bits = 48)]
+        #[offset(id = 0, count = 2)]
         #[derive(Clone, Debug, PartialEq, Eq)]
         struct DefaultEndianHeader {
             pub id: u16,

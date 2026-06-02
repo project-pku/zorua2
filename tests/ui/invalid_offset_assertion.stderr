@@ -1,0 +1,10 @@
+error[E0080]: evaluation panicked: field offset assertion failed
+  --> tests/ui/invalid_offset_assertion.rs:3:1
+   |
+ 3 | / bitstruct! {
+ 4 | |     #[repr(C)]
+ 5 | |     #[offset(b = 2)]
+ 6 | |     struct Bad {
+...  |
+10 | | }
+   | |_^ evaluation of `_` failed here

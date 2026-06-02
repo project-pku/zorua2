@@ -76,6 +76,140 @@ fn extract_default_endian(attrs: &mut Vec<Attribute>) -> Result<Option<DefaultEn
     Ok(default)
 }
 
+#[derive(Default)]
+struct LayoutAssertions {
+    size_bytes: Option<Expr>,
+    size_bits: Option<Expr>,
+    offsets: Vec<FieldOffsetAssertion>,
+}
+
+impl LayoutAssertions {
+    fn is_empty(&self) -> bool {
+        self.size_bytes.is_none() && self.size_bits.is_none() && self.offsets.is_empty()
+    }
+}
+
+struct SizeAssertionArg {
+    kind: Option<Ident>,
+    expr: Expr,
+}
+
+impl Parse for SizeAssertionArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(Ident) && input.peek2(Token![=]) {
+            let kind = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let expr = input.parse()?;
+            Ok(Self {
+                kind: Some(kind),
+                expr,
+            })
+        } else {
+            Ok(Self {
+                kind: None,
+                expr: input.parse()?,
+            })
+        }
+    }
+}
+
+#[derive(Clone)]
+struct FieldOffsetAssertion {
+    field: Ident,
+    offset: Expr,
+}
+
+impl Parse for FieldOffsetAssertion {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let field = input.parse()?;
+        input.parse::<Token![=]>()?;
+        let offset = input.parse()?;
+        Ok(Self { field, offset })
+    }
+}
+
+fn extract_layout_assertions(attrs: &mut Vec<Attribute>) -> Result<LayoutAssertions, syn::Error> {
+    let mut assertions = LayoutAssertions::default();
+    let mut retained = Vec::new();
+
+    for attr in attrs.drain(..) {
+        if attr.path().is_ident("size") {
+            let args =
+                attr.parse_args_with(Punctuated::<SizeAssertionArg, Token![,]>::parse_terminated)?;
+            if args.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "expected `#[size(bytes = EXPR)]`, `#[size(bits = EXPR)]`, or `#[size(EXPR)]`",
+                ));
+            }
+
+            for arg in args {
+                let kind = arg
+                    .kind
+                    .as_ref()
+                    .map(|ident| ident.to_string())
+                    .unwrap_or_else(|| "bytes".to_owned());
+                match kind.as_str() {
+                    "bytes" => {
+                        if assertions.size_bytes.replace(arg.expr).is_some() {
+                            return Err(syn::Error::new_spanned(
+                                attr,
+                                "duplicate byte size assertion",
+                            ));
+                        }
+                    }
+                    "bits" => {
+                        if assertions.size_bits.replace(arg.expr).is_some() {
+                            return Err(syn::Error::new_spanned(
+                                attr,
+                                "duplicate bit size assertion",
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            arg.kind.expect("named size assertion has kind"),
+                            "expected `bytes` or `bits` in #[size(...)]",
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+
+        if attr.path().is_ident("offset") {
+            let offsets = attr
+                .parse_args_with(Punctuated::<FieldOffsetAssertion, Token![,]>::parse_terminated)?;
+            if offsets.is_empty() {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "expected at least one `field = EXPR` offset assertion",
+                ));
+            }
+
+            for offset in offsets {
+                if assertions
+                    .offsets
+                    .iter()
+                    .any(|existing| existing.field == offset.field)
+                {
+                    return Err(syn::Error::new_spanned(
+                        offset.field,
+                        "duplicate field offset assertion",
+                    ));
+                }
+                assertions.offsets.push(offset);
+            }
+            continue;
+        }
+
+        retained.push(attr);
+    }
+
+    *attrs = retained;
+    Ok(assertions)
+}
+
 fn native_multibyte_storage(ty: &Type, endian: DefaultEndian) -> Option<Type> {
     let Type::Path(path) = ty else {
         return None;
@@ -928,6 +1062,7 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
     } = input;
 
     let default_endian = extract_default_endian(&mut attrs)?;
+    let layout_assertions = extract_layout_assertions(&mut attrs)?;
     for field in &mut fields {
         if field.padding_len.is_some() {
             continue;
@@ -1017,6 +1152,34 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
         })
         .collect();
 
+    let layout_assertion_body =
+        generate_layout_assertion_body(&name, &ty_generics, &layout_assertions);
+    let layout_assertion_assoc = if layout_assertions.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            const __ZORUA_ASSERT_LAYOUT: () = {
+                #layout_assertion_body
+            };
+        }
+    };
+    let layout_assertion_ref = if layout_assertions.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            let _ = Self::__ZORUA_ASSERT_LAYOUT;
+        }
+    };
+    let layout_assertion_const = if layout_assertions.is_empty() || !generics.params.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            const _: () = {
+                #layout_assertion_body
+            };
+        }
+    };
+
     // Generate flat backed field accessors
     let accessors: Vec<_> = fields
         .iter()
@@ -1037,12 +1200,14 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
 
                 let getter = quote! {
                     #field_vis fn #field_name(&self) -> BitArrayView<'_, #native_elem, #storage_elem> {
+                        #layout_assertion_ref
                         BitArrayView::new(self.#field_storage_name.as_bytes(), 0, #len, #stride_expr)
                     }
                 };
 
                 let setter = quote! {
                     #field_vis fn #field_setter(&mut self) -> BitArrayViewMut<'_, #native_elem, #storage_elem> {
+                        #layout_assertion_ref
                         BitArrayViewMut::new(self.#field_storage_name.as_mut_bytes(), 0, #len, #stride_expr)
                     }
                 };
@@ -1051,6 +1216,7 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
                 // Scalar flat backed field
                 let getter = quote! {
                     #field_vis fn #field_name(&self) -> <#field_native_type as BitCodec<#field_storage_type>>::Read {
+                        #layout_assertion_ref
                         <#field_native_type as BitCodec<#field_storage_type>>::read(
                             self.#field_storage_name.as_bytes(), 0)
                     }
@@ -1058,6 +1224,7 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
 
                 let setter = quote! {
                     #field_vis fn #field_setter(&mut self, val: #field_native_type) {
+                        #layout_assertion_ref
                         <#field_native_type as BitCodec<#field_storage_type>>::write_bits(
                             &val, self.#field_storage_name.as_mut_bytes(), 0);
                     }
@@ -1093,11 +1260,13 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
             quote! {
                 #(#field_attrs)*
                 #field_vis fn #field_raw_name(&self) -> #field_storage_type {
+                    #layout_assertion_ref
                     self.#field_storage_name
                 }
 
                 #(#field_attrs)*
                 #field_vis fn #field_raw_setter(&mut self, val: #field_storage_type) {
+                    #layout_assertion_ref
                     self.#field_storage_name = val;
                 }
             }
@@ -1172,6 +1341,10 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
                     } else {
                         quote! {}
                     };
+                    let offset_assertion = quote! {
+                        #layout_assertion_ref
+                        #offset_assertion
+                    };
 
                     let bits_expr = field_bits_expr(sf);
                     let prev = current_offset.clone();
@@ -1211,16 +1384,19 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
                 type Read = Self;
 
                 fn read_bits(src: &[u8], bit_offset: usize) -> Self {
+                    #layout_assertion_ref
                     let mut s = Self::new_zeroed();
                     bits::copy(src, bit_offset, s.as_mut_bytes(), 0, #bits_expr);
                     s
                 }
 
                 fn write_bits(&self, dst: &mut [u8], bit_offset: usize) {
+                    #layout_assertion_ref
                     bits::copy(self.as_bytes(), 0, dst, bit_offset, #bits_expr);
                 }
 
                 fn read(src: &[u8], bit_offset: usize) -> Self::Read {
+                    #layout_assertion_ref
                     <Self as BitCodec<#name #ty_generics>>::read_bits(src, bit_offset)
                 }
             }
@@ -1237,16 +1413,57 @@ fn generate_zorua_struct(input: ZoruaStructDef) -> Result<TokenStream, syn::Erro
         }
 
         impl #impl_generics #name #ty_generics #where_clause {
+            #layout_assertion_assoc
             #(#accessors)*
             #(#raw_accessors)*
             #(#bitfield_accessors)*
         }
 
+        #layout_assertion_const
         #(#bitfield_assertions)*
         #bits_impl
     };
 
     Ok(output.into())
+}
+
+fn generate_layout_assertion_body(
+    name: &Ident,
+    ty_generics: &syn::TypeGenerics<'_>,
+    assertions: &LayoutAssertions,
+) -> proc_macro2::TokenStream {
+    let size_bytes = assertions.size_bytes.as_ref().map(|expected| {
+        quote! {
+            assert!(
+                core::mem::size_of::<#name #ty_generics>() == (#expected),
+                "struct byte size assertion failed"
+            );
+        }
+    });
+    let size_bits = assertions.size_bits.as_ref().map(|expected| {
+        quote! {
+            assert!(
+                core::mem::size_of::<#name #ty_generics>() * 8 == (#expected),
+                "struct bit size assertion failed"
+            );
+        }
+    });
+    let offsets = assertions.offsets.iter().map(|assertion| {
+        let field = &assertion.field;
+        let expected = &assertion.offset;
+        quote! {
+            assert!(
+                core::mem::offset_of!(#name #ty_generics, #field) == (#expected),
+                "field offset assertion failed"
+            );
+        }
+    });
+
+    quote! {
+        #size_bytes
+        #size_bits
+        #(#offsets)*
+    }
 }
 
 /// Returns a token stream for the BITS of a subfield (used for sequential offset tracking).
